@@ -1,0 +1,6 @@
+{
+  "name": "File Upload Manager",
+  "description": "A modern, secure full-stack media and document manager with real-time file upload, categorization, preview, and download capabilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
