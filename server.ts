@@ -1,236 +1,389 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import multer from "multer";
 import { createServer as createViteServer } from "vite";
+import { PRODUCTS, BANNER_SLIDES } from "./src/data";
+import { Product, Order, BannerSlide, LayoutConfig } from "./src/types";
 
-// Interfaces
-interface FileMetadata {
-  id: string;
-  originalname: string;
-  filename: string;
-  mimetype: string;
-  size: number;
-  uploadedAt: string;
-  category: "image" | "audio" | "video" | "document" | "other";
-  notes?: string;
-}
+// Database storage file
+const DB_FILE = path.join(process.cwd(), "db.json");
 
-const app = express();
-const PORT = 3000;
-
-// Setup directories and DB file
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-const DB_FILE = path.join(process.cwd(), "uploads_db.json");
-
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
-
-// Helper to read database
-function readDatabase(): FileMetadata[] {
-  try {
-    if (!fs.existsSync(DB_FILE)) {
-      fs.writeFileSync(DB_FILE, JSON.stringify([], null, 2), "utf8");
-      return [];
-    }
-    const data = fs.readFileSync(DB_FILE, "utf8");
-    return JSON.parse(data);
-  } catch (err) {
-    console.error("Failed to read database, resetting to empty:", err);
-    return [];
-  }
-}
-
-// Helper to write database
-function writeDatabase(data: FileMetadata[]): void {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
-  } catch (err) {
-    console.error("Failed to write to database:", err);
-  }
-}
-
-// Helper to map mimetype to category
-function getCategory(mimetype: string, originalname: string): "image" | "audio" | "video" | "document" | "other" {
-  const mime = mimetype.toLowerCase();
-  const ext = path.extname(originalname).toLowerCase();
-
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime.startsWith("video/")) return "video";
-
-  const docExtensions = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".json", ".csv", ".rtf"];
-  if (mime.startsWith("text/") || mime.includes("pdf") || mime.includes("document") || mime.includes("sheet") || mime.includes("presentation") || docExtensions.includes(ext)) {
-    return "document";
-  }
-
-  return "other";
-}
-
-// Configure Multer disk storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (req, file, cb) => {
-    // Generate unique safe filename
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    const baseName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9]/g, "_");
-    cb(null, `${baseName}-${uniqueSuffix}${ext}`);
-  }
-});
-
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB limit
-  }
-});
-
-// Middleware for parsing JSON and URL encoded data
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Enable CORS for all API endpoints to allow Vercel frontends to connect
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
-// Serve uploaded files statically with correct headers (support content disposition & range requests)
-app.use("/uploads", express.static(UPLOADS_DIR, {
-  setHeaders: (res, filePath) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    // Support playing media directly in browser
-    res.setHeader("Accept-Ranges", "bytes");
-  }
-}));
-
-// API Routes
-
-// 1. GET all files and system stats
-app.get("/api/files", (req, res) => {
-  const files = readDatabase();
-  res.json(files);
-});
-
-// 2. GET general server stats
-app.get("/api/stats", (req, res) => {
-  const files = readDatabase();
-  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-  const categoriesCount = {
-    image: files.filter(f => f.category === "image").length,
-    audio: files.filter(f => f.category === "audio").length,
-    video: files.filter(f => f.category === "video").length,
-    document: files.filter(f => f.category === "document").length,
-    other: files.filter(f => f.category === "other").length,
+interface DatabaseSchema {
+  products: Product[];
+  slides: BannerSlide[];
+  orders: Order[];
+  inquiries: {
+    id: string;
+    name: string;
+    phone: string;
+    message: string;
+    created_at: string;
+  }[];
+  customLogo: string;
+  layout?: LayoutConfig;
+  supabaseConfig?: {
+    url: string;
+    anonKey: string;
   };
+}
 
-  res.json({
-    totalFiles: files.length,
-    totalSize,
-    categories: categoriesCount
-  });
-});
-
-// 3. POST upload multiple files
-app.post("/api/upload", upload.array("files"), (req, res) => {
+// Read database or initialize with seed data
+function readDb(): DatabaseSchema {
   try {
-    const uploadedFiles = req.files as Express.Multer.File[];
-    if (!uploadedFiles || uploadedFiles.length === 0) {
-      return res.status(400).json({ error: "No files uploaded." });
-    }
-
-    const db = readDatabase();
-    const newFiles: FileMetadata[] = [];
-
-    uploadedFiles.forEach(file => {
-      const metadata: FileMetadata = {
-        id: Math.random().toString(36).substring(2, 11),
-        originalname: file.originalname,
-        filename: file.filename,
-        mimetype: file.mimetype,
-        size: file.size,
-        uploadedAt: new Date().toISOString(),
-        category: getCategory(file.mimetype, file.originalname),
-        notes: (req.body.notes as string) || ""
-      };
-      newFiles.push(metadata);
-      db.push(metadata);
-    });
-
-    writeDatabase(db);
-    res.status(201).json({
-      message: `${newFiles.length} file(s) uploaded successfully!`,
-      files: newFiles
-    });
-  } catch (err: any) {
-    console.error("Upload handler error:", err);
-    res.status(500).json({ error: err.message || "Something went wrong during upload" });
-  }
-});
-
-// 4. POST edit file notes or originalname
-app.post("/api/files/:id/edit", (req, res) => {
-  const { id } = req.params;
-  const { originalname, notes } = req.body;
-
-  const db = readDatabase();
-  const fileIndex = db.findIndex(f => f.id === id);
-
-  if (fileIndex === -1) {
-    return res.status(404).json({ error: "File not found" });
-  }
-
-  if (originalname !== undefined && originalname.trim() !== "") {
-    db[fileIndex].originalname = originalname.trim();
-  }
-  if (notes !== undefined) {
-    db[fileIndex].notes = notes.trim();
-  }
-
-  writeDatabase(db);
-  res.json({ message: "File updated successfully", file: db[fileIndex] });
-});
-
-// 5. DELETE a file
-app.delete("/api/files/:id", (req, res) => {
-  const { id } = req.params;
-  const db = readDatabase();
-  const fileIndex = db.findIndex(f => f.id === id);
-
-  if (fileIndex === -1) {
-    return res.status(404).json({ error: "File not found" });
-  }
-
-  const fileInfo = db[fileIndex];
-  const filePath = path.join(UPLOADS_DIR, fileInfo.filename);
-
-  // Delete from disk
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    if (fs.existsSync(DB_FILE)) {
+      const content = fs.readFileSync(DB_FILE, "utf-8");
+      const db = JSON.parse(content);
+      // Ensure layout exists
+      if (!db.layout) {
+        db.layout = {
+          showSlider: true,
+          showCategories: true,
+          showFlashSale: true,
+          showTrending: true,
+          showReviews: true,
+          showInquiry: true,
+          showFooter: true
+        };
+        writeDb(db);
+      }
+      return db;
     }
   } catch (err) {
-    console.error(`Failed to delete file from disk: ${filePath}`, err);
+    console.error("Error reading db.json, recreating...", err);
   }
 
-  // Delete from DB
-  db.splice(fileIndex, 1);
-  writeDatabase(db);
+  // Seed default data
+  const defaultDb: DatabaseSchema = {
+    products: PRODUCTS,
+    slides: BANNER_SLIDES,
+    orders: [],
+    inquiries: [],
+    customLogo: "",
+    layout: {
+      showSlider: true,
+      showCategories: true,
+      showFlashSale: true,
+      showTrending: true,
+      showReviews: true,
+      showInquiry: true,
+      showFooter: true
+    }
+  };
+  writeDb(defaultDb);
+  return defaultDb;
+}
 
-  res.json({ message: "File deleted successfully" });
-});
+function writeDb(data: DatabaseSchema) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error writing db.json:", err);
+  }
+}
 
-// Setup Vite or production serving
 async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // Allow Cross-Origin Resource Sharing (CORS) for external frontends like Vercel
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
+  // Middleware with large limits for base64 / image uploads
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // Create uploads directory if it doesn't exist
+  const UPLOADS_DIR = path.join(process.cwd(), "uploads");
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+
+  // Serve uploads directory statically
+  app.use("/uploads", express.static(UPLOADS_DIR));
+
+  // API Routes: Products
+  app.get("/api/products", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, data: db.products });
+  });
+
+  app.post("/api/products", (req, res) => {
+    try {
+      const db = readDb();
+      const newProduct = req.body as Product;
+      
+      if (!newProduct.id) {
+        newProduct.id = "prod_" + Date.now();
+      }
+      
+      // Check if product exists to update it, or add as new
+      const index = db.products.findIndex(p => p.id === newProduct.id);
+      if (index > -1) {
+        db.products[index] = { ...db.products[index], ...newProduct };
+      } else {
+        db.products.push(newProduct);
+      }
+      
+      writeDb(db);
+      res.json({ success: true, data: db.products });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.put("/api/products/:id", (req, res) => {
+    try {
+      const db = readDb();
+      const id = req.params.id;
+      const updatedProduct = req.body as Product;
+      
+      const index = db.products.findIndex(p => p.id === id);
+      if (index > -1) {
+        db.products[index] = { ...db.products[index], ...updatedProduct };
+        writeDb(db);
+        res.json({ success: true, data: db.products });
+      } else {
+        res.status(404).json({ success: false, error: "Product not found" });
+      }
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.delete("/api/products/:id", (req, res) => {
+    try {
+      const db = readDb();
+      const id = req.params.id;
+      
+      db.products = db.products.filter(p => p.id !== id);
+      writeDb(db);
+      res.json({ success: true, data: db.products });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Bulk overwrite/push products (for restore default or manual upload syncs)
+  app.post("/api/products/bulk", (req, res) => {
+    try {
+      const db = readDb();
+      const updatedList = req.body as Product[];
+      db.products = updatedList;
+      writeDb(db);
+      res.json({ success: true, data: db.products });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Slides
+  app.get("/api/slides", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, data: db.slides });
+  });
+
+  app.post("/api/slides", (req, res) => {
+    try {
+      const db = readDb();
+      db.slides = req.body as BannerSlide[];
+      writeDb(db);
+      res.json({ success: true, data: db.slides });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Orders
+  app.get("/api/orders", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, data: db.orders });
+  });
+
+  app.post("/api/orders", (req, res) => {
+    try {
+      const db = readDb();
+      const newOrder = req.body as Order;
+      if (!newOrder.id) {
+        newOrder.id = "order_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+      }
+      
+      // Push order
+      db.orders.unshift(newOrder); // Newest orders first
+      writeDb(db);
+      res.json({ success: true, data: newOrder });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.put("/api/orders/:id/status", (req, res) => {
+    try {
+      const db = readDb();
+      const id = req.params.id;
+      const { status } = req.body as { status: Order["status"] };
+      
+      const index = db.orders.findIndex(o => o.id === id);
+      if (index > -1) {
+        db.orders[index].status = status;
+        writeDb(db);
+        res.json({ success: true, data: db.orders[index] });
+      } else {
+        res.status(404).json({ success: false, error: "Order not found" });
+      }
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.delete("/api/orders/:id", (req, res) => {
+    try {
+      const db = readDb();
+      const id = req.params.id;
+      db.orders = db.orders.filter(o => o.id !== id);
+      writeDb(db);
+      res.json({ success: true, data: db.orders });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Inquiries / Appointments
+  app.get("/api/inquiries", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, data: db.inquiries });
+  });
+
+  app.delete("/api/inquiries/:id", (req, res) => {
+    try {
+      const db = readDb();
+      const id = req.params.id;
+      db.inquiries = db.inquiries.filter(i => i.id !== id);
+      writeDb(db);
+      res.json({ success: true, data: db.inquiries });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post("/api/inquiries", (req, res) => {
+    try {
+      const db = readDb();
+      const newInquiry = req.body as { name: string; phone: string; message: string };
+      const created = {
+        id: "inq_" + Date.now(),
+        ...newInquiry,
+        created_at: new Date().toISOString()
+      };
+      
+      db.inquiries.unshift(created);
+      writeDb(db);
+      res.json({ success: true, data: created });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Custom Store Logo & Config
+  app.get("/api/logo", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, logo: db.customLogo });
+  });
+
+  app.post("/api/logo", (req, res) => {
+    try {
+      const db = readDb();
+      db.customLogo = req.body.logo || "";
+      writeDb(db);
+      res.json({ success: true, logo: db.customLogo });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Layout Config setting toggle switches
+  app.get("/api/layout", (req, res) => {
+    const db = readDb();
+    res.json({ success: true, data: db.layout });
+  });
+
+  app.post("/api/layout", (req, res) => {
+    try {
+      const db = readDb();
+      db.layout = { ...db.layout, ...req.body } as LayoutConfig;
+      writeDb(db);
+      res.json({ success: true, data: db.layout });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Supabase Configuration (to make custom Supabase persistent for all visitors)
+  app.get("/api/supabase-config", (req, res) => {
+    const db = readDb();
+    res.json({
+      success: true,
+      url: db.supabaseConfig?.url || "",
+      anonKey: db.supabaseConfig?.anonKey || ""
+    });
+  });
+
+  app.post("/api/supabase-config", (req, res) => {
+    try {
+      const db = readDb();
+      const { url, anonKey } = req.body;
+      db.supabaseConfig = {
+        url: url ? url.trim() : "",
+        anonKey: anonKey ? anonKey.trim() : ""
+      };
+      writeDb(db);
+      res.json({ success: true, data: db.supabaseConfig });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API Routes: Image uploader (handles base64 image strings and writes locally)
+  app.post("/api/upload", (req, res) => {
+    try {
+      const { image, filename } = req.body as { image: string; filename?: string };
+      if (!image) {
+        return res.status(400).json({ success: false, error: "No image content provided" });
+      }
+
+      // If it's a data URL, strip header and save binary data
+      const matches = image.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      if (!matches || matches.length !== 3) {
+        // Assume already uploaded URL or format we can't parse directly
+        return res.json({ success: true, url: image });
+      }
+
+      const mimeType = matches[1];
+      const base64Data = matches[2];
+      const buffer = Buffer.from(base64Data, "base64");
+
+      const extension = mimeType.split("/")[1] || "png";
+      const fileId = "img_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+      const name = filename ? `${fileId}_${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}` : `${fileId}.${extension}`;
+      const filePath = path.join(UPLOADS_DIR, name);
+
+      fs.writeFileSync(filePath, buffer);
+
+      const publicUrl = `/uploads/${name}`;
+      res.json({ success: true, url: publicUrl });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Vite Dev Server middleware or production static build serving
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -246,7 +399,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

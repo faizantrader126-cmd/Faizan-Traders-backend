@@ -265,17 +265,48 @@ export default function App() {
 
   // Load products, slides, and orders from Express backend API
   useEffect(() => {
-    import('./lib/supabase').then(({ fetchProductsFromSupabase }) => {
-      fetchProductsFromSupabase().then((res) => {
-        if (res.success && res.data && res.data.length > 0) {
-          console.log('Synchronized products catalogue live from cloud server.');
-          setProducts(res.data);
-          safeSetLocalStorage('faizan_traders_products', JSON.stringify(res.data));
+    // Fetch custom Supabase credentials from the server first to ensure they are loaded dynamically
+    fetch(getApiUrl('/api/supabase-config'))
+      .then(res => res.json())
+      .then(json => {
+        if (json.success && json.url && json.anonKey) {
+          import('./lib/supabase').then(({ updateSupabaseClient }) => {
+            updateSupabaseClient(json.url, json.anonKey);
+            // Dynamic client updated, now pull active products catalog from it
+            import('./lib/supabase').then(({ fetchProductsFromSupabase }) => {
+              fetchProductsFromSupabase().then((res) => {
+                if (res.success && res.data && res.data.length > 0) {
+                  console.log('Synchronized products catalogue live from custom cloud database.');
+                  setProducts(res.data);
+                  safeSetLocalStorage('faizan_traders_products', JSON.stringify(res.data));
+                }
+              });
+            });
+          });
+        } else {
+          // Fallback if no custom configuration saved yet on server
+          import('./lib/supabase').then(({ fetchProductsFromSupabase }) => {
+            fetchProductsFromSupabase().then((res) => {
+              if (res.success && res.data && res.data.length > 0) {
+                console.log('Synchronized products catalogue live from default cloud server.');
+                setProducts(res.data);
+                safeSetLocalStorage('faizan_traders_products', JSON.stringify(res.data));
+              }
+            });
+          });
         }
+      })
+      .catch(err => {
+        console.error('Error fetching Supabase credentials from server, using local default:', err);
+        import('./lib/supabase').then(({ fetchProductsFromSupabase }) => {
+          fetchProductsFromSupabase().then((res) => {
+            if (res.success && res.data && res.data.length > 0) {
+              setProducts(res.data);
+              safeSetLocalStorage('faizan_traders_products', JSON.stringify(res.data));
+            }
+          });
+        });
       });
-    }).catch(err => {
-      console.error('Failed to import database helper:', err);
-    });
 
     // Fetch slides from Express backend
     fetch(getApiUrl('/api/slides'))

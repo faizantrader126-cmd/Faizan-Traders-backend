@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { Product, BannerSlide, LayoutConfig } from '../types';
 import { CATEGORIES, BANNER_SLIDES } from '../data';
 import { 
-  X, Search, Plus, Edit2, Trash2, RotateCcw, Save, 
+  X, Search, Plus, Edit2, Trash2, RotateCcw, Save, Copy,
   ArrowLeft, Image, Check, AlertTriangle, Layers, Info, Sparkles, Upload,
   TrendingUp, Coins, Database, MailOpen, LayoutDashboard, Eye, Lock, Unlock, Loader2, ExternalLink, Trash, Palette
 } from 'lucide-react';
 import { getApiUrl } from '../lib/apiConfig';
-import { supabase, supabaseUrl, supabaseKey, upsertProductToSupabase, deleteProductFromSupabase, pushAllProductsToSupabase, fetchProductsFromSupabase } from '../lib/supabase';
+import { supabase, supabaseUrl, supabaseKey, upsertProductToSupabase, deleteProductFromSupabase, pushAllProductsToSupabase, fetchProductsFromSupabase, getActiveSupabaseCredentials } from '../lib/supabase';
 import { getSavedTheme, saveAndApplyTheme, THEME_PRESETS, ThemeConfig } from '../lib/theme';
 
 
@@ -291,7 +291,7 @@ export default function ProductManagerModal({
   });
   const [supabaseSaveStatus, setSupabaseSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  const handleSaveSupabaseConfig = (e: React.FormEvent) => {
+  const handleSaveSupabaseConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!supabaseUrlInput.trim() || !supabaseAnonKeyInput.trim()) {
       alert("Please fill in both Supabase URL and Anon/Public Key.");
@@ -299,26 +299,56 @@ export default function ProductManagerModal({
     }
     setSupabaseSaveStatus('saving');
     try {
+      // Save locally for quick retrieval
       localStorage.setItem('custom_supabase_url', supabaseUrlInput.trim());
       localStorage.setItem('custom_supabase_anon_key', supabaseAnonKeyInput.trim());
+      
+      // Save on the server to make it persistent for all users
+      const response = await fetch(getApiUrl('/api/supabase-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: supabaseUrlInput.trim(),
+          anonKey: supabaseAnonKeyInput.trim()
+        })
+      });
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Server error saving config');
+      }
+
       setSupabaseSaveStatus('saved');
       setTimeout(() => {
         setSupabaseSaveStatus('idle');
         window.location.reload();
       }, 1200);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      alert(`Error saving configuration to server: ${err.message || err}`);
       setSupabaseSaveStatus('error');
     }
   };
 
-  const handleResetSupabaseConfig = () => {
+  const handleResetSupabaseConfig = async () => {
     if (window.confirm("Are you sure you want to reset to default Supabase settings?")) {
-      localStorage.removeItem('custom_supabase_url');
-      localStorage.removeItem('custom_supabase_anon_key');
-      setSupabaseUrlInput('');
-      setSupabaseAnonKeyInput('');
-      window.location.reload();
+      try {
+        localStorage.removeItem('custom_supabase_url');
+        localStorage.removeItem('custom_supabase_anon_key');
+        setSupabaseUrlInput('');
+        setSupabaseAnonKeyInput('');
+
+        // Reset on the server too
+        await fetch(getApiUrl('/api/supabase-config'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: '', anonKey: '' })
+        });
+
+        window.location.reload();
+      } catch (err: any) {
+        console.error(err);
+        alert(`Error resetting configuration on server: ${err.message || err}`);
+      }
     }
   };
 
@@ -396,6 +426,10 @@ export default function ProductManagerModal({
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // SQL schema code helper states
+  const [sqlTab, setSqlTab] = useState<'safe' | 'recreate'>('safe');
+  const [copiedSql, setCopiedSql] = useState(false);
+
   // Slideshow dynamic states
   const [localSlides, setLocalSlides] = useState<BannerSlide[]>([]);
 
@@ -404,14 +438,26 @@ export default function ProductManagerModal({
     setIsLoadingOrders(true);
     setOrdersLoadError('');
     try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (error) {
-        setOrdersLoadError(error.message);
+      const creds = getActiveSupabaseCredentials();
+      if (creds.isCustom) {
+        const { data, error } = await supabase
+          .from('orders')
+          .select('*')
+          .order('created_at', { ascending: false });
+        if (error) {
+          setOrdersLoadError(error.message);
+        } else {
+          setOrdersDb(data || []);
+        }
       } else {
-        setOrdersDb(data || []);
+        // Fallback to Express backend server local database
+        const res = await fetch(getApiUrl('/api/orders'));
+        const json = await res.json();
+        if (json.success) {
+          setOrdersDb(json.data || []);
+        } else {
+          setOrdersLoadError(json.error || 'Server error');
+        }
       }
     } catch (err: any) {
       setOrdersLoadError(err?.message || 'Database connection error.');
@@ -424,35 +470,47 @@ export default function ProductManagerModal({
     setIsLoadingInquiries(true);
     setInquiriesLoadError('');
     try {
-      // Try 'appointments' standard table
-      const { data, error } = await supabase
-        .from('appointments')
-        .select('*')
-        .order('created_at', { ascending: false });
-      
-      if (!error) {
-        setInquiriesDb(data || []);
-      } else {
-        // Try fallback table 'bookings'
-        const { data: bData, error: bErr } = await supabase
-          .from('bookings')
+      const creds = getActiveSupabaseCredentials();
+      if (creds.isCustom) {
+        // Try 'appointments' standard table
+        const { data, error } = await supabase
+          .from('appointments')
           .select('*')
           .order('created_at', { ascending: false });
         
-        if (!bErr) {
-          setInquiriesDb(bData || []);
+        if (!error) {
+          setInquiriesDb(data || []);
         } else {
-          // Try fallback table 'inquiries'
-          const { data: iData, error: iErr } = await supabase
-            .from('inquiries')
+          // Try fallback table 'bookings'
+          const { data: bData, error: bErr } = await supabase
+            .from('bookings')
             .select('*')
             .order('created_at', { ascending: false });
           
-          if (!iErr) {
-            setInquiriesDb(iData || []);
+          if (!bErr) {
+            setInquiriesDb(bData || []);
           } else {
-            setInquiriesLoadError('No appointments, bookings, or inquiries tables found in Supabase.');
+            // Try fallback table 'inquiries'
+            const { data: iData, error: iErr } = await supabase
+              .from('inquiries')
+              .select('*')
+              .order('created_at', { ascending: false });
+            
+            if (!iErr) {
+              setInquiriesDb(iData || []);
+            } else {
+              setInquiriesLoadError('No appointments, bookings, or inquiries tables found in Supabase.');
+            }
           }
+        }
+      } else {
+        // Fallback to Express backend server local database
+        const res = await fetch(getApiUrl('/api/inquiries'));
+        const json = await res.json();
+        if (json.success) {
+          setInquiriesDb(json.data || []);
+        } else {
+          setInquiriesLoadError(json.error || 'Server error');
         }
       }
     } catch (err: any) {
@@ -464,15 +522,33 @@ export default function ProductManagerModal({
 
   const handleUpdateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
-      const { error } = await supabase
-        .from('orders')
-        .update({ status: newStatus })
-        .eq('order_id', orderId);
-      
-      if (error) {
-        alert('Supabase Update Failed: ' + error.message);
+      const creds = getActiveSupabaseCredentials();
+      if (creds.isCustom) {
+        const { error } = await supabase
+          .from('orders')
+          .update({ status: newStatus })
+          .eq('order_id', orderId);
+        
+        if (error) {
+          alert('Supabase Update Failed: ' + error.message);
+        } else {
+          setOrdersDb(prev => prev.map(o => o.order_id === orderId ? { ...o, status: newStatus } : o));
+        }
       } else {
-        setOrdersDb(prev => prev.map(o => o.order_id === orderId ? { ...o, status: newStatus } : o));
+        // Find actual item key or standard id
+        const orderToUpdate = ordersDb.find(o => o.order_id === orderId || o.id === orderId);
+        const idToUse = orderToUpdate?.id || orderId;
+        const res = await fetch(getApiUrl(`/api/orders/${idToUse}/status`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: newStatus })
+        });
+        const json = await res.json();
+        if (json.success) {
+          setOrdersDb(prev => prev.map(o => (o.order_id === orderId || o.id === orderId) ? { ...o, status: newStatus } : o));
+        } else {
+          alert('Server Update Failed: ' + json.error);
+        }
       }
     } catch (err: any) {
       alert('Error updating order: ' + err.message);
@@ -480,17 +556,30 @@ export default function ProductManagerModal({
   };
 
   const handleDeleteOrderDb = async (id: string, orderId: string) => {
-    const confirmDel = window.confirm(`Remove order ${orderId} from Supabase permanent database history?`);
+    const confirmDel = window.confirm(`Remove order ${orderId} from permanent database history?`);
     if (!confirmDel) return;
     try {
-      const { error } = await supabase
-        .from('orders')
-        .delete()
-        .eq('id', id);
-      if (error) {
-        alert('Deletion Failed: ' + error.message);
+      const creds = getActiveSupabaseCredentials();
+      if (creds.isCustom) {
+        const { error } = await supabase
+          .from('orders')
+          .delete()
+          .eq('id', id);
+        if (error) {
+          alert('Deletion Failed: ' + error.message);
+        } else {
+          setOrdersDb(prev => prev.filter(o => o.id !== id));
+        }
       } else {
-        setOrdersDb(prev => prev.filter(o => o.id !== id));
+        const res = await fetch(getApiUrl(`/api/orders/${id}`), {
+          method: 'DELETE'
+        });
+        const json = await res.json();
+        if (json.success) {
+          setOrdersDb(prev => prev.filter(o => o.id !== id && o.order_id !== orderId));
+        } else {
+          alert('Server Deletion Failed: ' + json.error);
+        }
       }
     } catch (err: any) {
       alert('Error: ' + err.message);
@@ -498,16 +587,29 @@ export default function ProductManagerModal({
   };
 
   const handleDeleteInquiryDb = async (id: string) => {
-    const confirmDel = window.confirm('Delete this appointment submission from Supabase?');
+    const confirmDel = window.confirm('Delete this appointment submission?');
     if (!confirmDel) return;
     try {
-      // Attempt delete from appointments/bookings/inquiries
-      const { error: err1 } = await supabase.from('appointments').delete().eq('id', id);
-      const { error: err2 } = await supabase.from('bookings').delete().eq('id', id);
-      const { error: err3 } = await supabase.from('inquiries').delete().eq('id', id);
-      
-      // Filter from state regardless if any succeeded
-      setInquiriesDb(prev => prev.filter(i => i.id !== id));
+      const creds = getActiveSupabaseCredentials();
+      if (creds.isCustom) {
+        // Attempt delete from appointments/bookings/inquiries
+        const { error: err1 } = await supabase.from('appointments').delete().eq('id', id);
+        const { error: err2 } = await supabase.from('bookings').delete().eq('id', id);
+        const { error: err3 } = await supabase.from('inquiries').delete().eq('id', id);
+        
+        // Filter from state regardless if any succeeded
+        setInquiriesDb(prev => prev.filter(i => i.id !== id));
+      } else {
+        const res = await fetch(getApiUrl(`/api/inquiries/${id}`), {
+          method: 'DELETE'
+        });
+        const json = await res.json();
+        if (json.success) {
+          setInquiriesDb(prev => prev.filter(i => i.id !== id));
+        } else {
+          alert('Server Deletion Failed: ' + json.error);
+        }
+      }
     } catch (err: any) {
       alert('Error: ' + err.message);
     }
@@ -1611,11 +1713,63 @@ export default function ProductManagerModal({
                   )}
                 </div>
 
-                <p className="font-sans text-zinc-600">
-                  To receive and query bookings or purchases, please log in to your <strong>Supabase Dashboard (Project ID: {supabaseUrl ? (supabaseUrl.replace('https://', '').split('.')[0] || 'vwoqpxljyxqacadnpgfk') : 'vwoqpxljyxqacadnpgfk'})</strong>, navigate to the <strong>SQL Editor</strong>, and paste the database tables schema below to create the required tables:
-                </p>
-                <pre className="p-3 bg-zinc-950 text-emerald-400 rounded-xl overflow-x-auto text-[10px] font-mono select-all leading-relaxed whitespace-pre font-medium shadow-inner max-h-48 border border-zinc-900 border-t-zinc-800">
-{`-- 1. Create Appointments Table
+                {/* URDU/ENGLISH MULTILINGUAL DATABASE CONFIGURATION GUIDE */}
+                <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-4 text-left space-y-2 text-xs text-amber-900 leading-relaxed font-sans">
+                  <div className="font-extrabold flex items-center gap-1.5 text-amber-800 text-sm">
+                    <Sparkles className="h-4.5 w-4.5 text-amber-600 animate-pulse shrink-0" />
+                    <span>Supabase SQL Schema Guide & Error Fixer (Urdu / English)</span>
+                  </div>
+                  <p className="font-medium text-[11px] text-amber-800 leading-relaxed">
+                    اگر آپ کے سپابیس (Supabase) میں ٹیبلز بناتے وقت کوئی ایرر یا ڈیٹا سنکرونائزیشن (Sync) میں مسئلہ آرہا ہے، تو پریشان نہ ہوں! نیچے دیا گیا کوڈ کاپی کر کے رن کریں، یہ تمام پرانے مسائل حل کر دے گا:
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1.5 text-[11px] pl-1 text-amber-950 font-medium">
+                    <li>اپنے <strong className="text-amber-900">Supabase Dashboard</strong> میں لاگ ان کریں اور بائیں جانب مینو میں <strong className="text-amber-900">SQL Editor</strong> کو کھولیں۔</li>
+                    <li>اوپر موجود <strong className="text-amber-900">+ New Query</strong> بٹن پر کلک کریں۔</li>
+                    <li>نیچے موجود ٹیبز میں سے اپنے مطابق سکرپٹ کا انتخاب کریں اور <strong className="text-amber-900">Copy Code</strong> بٹن دبا کر اسے کاپی کریں۔</li>
+                    <li>اسے سپابیس کے SQL ایڈیٹر میں پیسٹ کریں اور نیچے دائیں طرف موجود سب سے بڑے نیلی رنگ کے <strong className="text-amber-900">Run (یا Ctrl + Enter)</strong> بٹن کو دبا دیں۔</li>
+                  </ol>
+                  <div className="pt-1.5 border-t border-amber-200 text-[10px] text-amber-700 font-semibold leading-relaxed">
+                    💡 <strong>Auto-RLS Bypass:</strong> اس سکرپٹ میں ہم نے Row Level Security (RLS) کو آف کر دیا ہے، جس سے آپ کو "Permission Denied" یا "Empty Array" والے پرمیشن ایررز کبھی نہیں آئیں گے!
+                  </div>
+                </div>
+
+                <div className="space-y-3 font-sans">
+                  {/* TAB SELECTOR FOR SQL SCRIPTS */}
+                  <div className="flex items-center justify-between border-b border-zinc-200 pb-1">
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSqlTab('safe')}
+                        className={`px-3 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer ${
+                          sqlTab === 'safe'
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                        }`}
+                      >
+                        1. Safe Setup (IF NOT EXISTS)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSqlTab('recreate')}
+                        className={`px-3 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer ${
+                          sqlTab === 'recreate'
+                            ? 'bg-rose-600 text-white shadow-sm'
+                            : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                        }`}
+                      >
+                        2. Force Clean Recreate (Fixes Errors)
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const codeToCopy = sqlTab === 'safe'
+                          ? `-- Enable standard UUID extensions (fixes gen_random_uuid errors)
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Create Appointments Table
 CREATE TABLE IF NOT EXISTS appointments (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   name text NOT NULL,
@@ -1662,10 +1816,224 @@ CREATE TABLE IF NOT EXISTS products (
   stock numeric DEFAULT 10,
   badge text,
   created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
-);`}
-                </pre>
-                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-medium font-sans">
-                  <Info className="h-4.5 w-4.5 text-[#ca8a04]" />
+);
+
+-- Disable Row Level Security (RLS) to instantly fix Permission Denied / empty sync blocks
+ALTER TABLE appointments DISABLE ROW LEVEL SECURITY;
+ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+ALTER TABLE products DISABLE ROW LEVEL SECURITY;`
+                          : `-- WARNING: This drops your old tables and recreates them freshly. Fixes 'already exists' or schema errors.
+DROP TABLE IF EXISTS appointments CASCADE;
+DROP TABLE IF EXISTS orders CASCADE;
+DROP TABLE IF EXISTS products CASCADE;
+
+-- Enable standard UUID extensions (fixes gen_random_uuid errors)
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Create Appointments Table
+CREATE TABLE appointments (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  name text NOT NULL,
+  phone text NOT NULL,
+  message text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 2. Create Store Products Orders Table  
+CREATE TABLE orders (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id text NOT NULL,
+  customer_name text NOT NULL,
+  customer_phone text NOT NULL,
+  customer_whatsapp text,
+  customer_address text NOT NULL,
+  customer_city text NOT NULL,
+  customer_notes text,
+  items jsonb NOT NULL,
+  total_amount numeric NOT NULL,
+  shipping_cost numeric NOT NULL,
+  status text NOT NULL DEFAULT 'Pending',
+  payment_method text NOT NULL,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 3. Create Products Table
+CREATE TABLE products (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  price numeric NOT NULL,
+  original_price numeric NOT NULL,
+  description text,
+  long_description text,
+  image text NOT NULL,
+  images text[] DEFAULT '{}',
+  rating numeric DEFAULT 5,
+  reviews_count numeric DEFAULT 0,
+  category text NOT NULL,
+  features text[] DEFAULT '{}',
+  variants text[] DEFAULT '{}',
+  sizes text[] DEFAULT '{}',
+  variant_images jsonb DEFAULT '{}'::jsonb,
+  stock numeric DEFAULT 10,
+  badge text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Disable Row Level Security (RLS) to instantly fix Permission Denied / empty sync blocks
+ALTER TABLE appointments DISABLE ROW LEVEL SECURITY;
+ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+ALTER TABLE products DISABLE ROW LEVEL SECURITY;`;
+
+                        navigator.clipboard.writeText(codeToCopy);
+                        setCopiedSql(true);
+                        setTimeout(() => setCopiedSql(false), 2200);
+                      }}
+                      className={`px-3 py-1.5 text-[11px] font-bold rounded-lg flex items-center gap-1 transition-all cursor-pointer ${
+                        copiedSql 
+                          ? 'bg-emerald-600 text-white animate-bounce' 
+                          : 'bg-zinc-800 hover:bg-zinc-900 text-white'
+                      }`}
+                    >
+                      {copiedSql ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      <span>{copiedSql ? "SQL Copied!" : "Copy SQL Code"}</span>
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-zinc-500 font-medium">
+                    {sqlTab === 'safe' 
+                      ? "Recommended for new setups. It safely creates tables if they do not exist already." 
+                      : "🔥 WARNING: This drops and recreates everything from scratch. Ideal if you changed columns and got SQL compile errors."}
+                  </p>
+
+                  <pre className="p-3 bg-zinc-950 text-emerald-400 rounded-xl overflow-x-auto text-[10px] font-mono leading-relaxed whitespace-pre font-medium shadow-inner max-h-56 border border-zinc-900 border-t-zinc-800 select-all">
+                    {sqlTab === 'safe' ? (
+`-- Enable standard UUID extensions (fixes gen_random_uuid errors)
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Create Appointments Table
+CREATE TABLE IF NOT EXISTS appointments (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  name text NOT NULL,
+  phone text NOT NULL,
+  message text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 2. Create Store Products Orders Table  
+CREATE TABLE IF NOT EXISTS orders (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id text NOT NULL,
+  customer_name text NOT NULL,
+  customer_phone text NOT NULL,
+  customer_whatsapp text,
+  customer_address text NOT NULL,
+  customer_city text NOT NULL,
+  customer_notes text,
+  items jsonb NOT NULL,
+  total_amount numeric NOT NULL,
+  shipping_cost numeric NOT NULL,
+  status text NOT NULL DEFAULT 'Pending',
+  payment_method text NOT NULL,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 3. Create Products Table
+CREATE TABLE IF NOT EXISTS products (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  price numeric NOT NULL,
+  original_price numeric NOT NULL,
+  description text,
+  long_description text,
+  image text NOT NULL,
+  images text[] DEFAULT '{}',
+  rating numeric DEFAULT 5,
+  reviews_count numeric DEFAULT 0,
+  category text NOT NULL,
+  features text[] DEFAULT '{}',
+  variants text[] DEFAULT '{}',
+  sizes text[] DEFAULT '{}',
+  variant_images jsonb DEFAULT '{}'::jsonb,
+  stock numeric DEFAULT 10,
+  badge text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Disable Row Level Security (RLS) to instantly fix Permission Denied / empty sync blocks
+ALTER TABLE appointments DISABLE ROW LEVEL SECURITY;
+ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+ALTER TABLE products DISABLE ROW LEVEL SECURITY;`
+                    ) : (
+`-- WARNING: This drops your old tables and recreates them freshly. Fixes 'already exists' or schema errors.
+DROP TABLE IF EXISTS appointments CASCADE;
+DROP TABLE IF EXISTS orders CASCADE;
+DROP TABLE IF EXISTS products CASCADE;
+
+-- Enable standard UUID extensions (fixes gen_random_uuid errors)
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Create Appointments Table
+CREATE TABLE appointments (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  name text NOT NULL,
+  phone text NOT NULL,
+  message text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 2. Create Store Products Orders Table  
+CREATE TABLE orders (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id text NOT NULL,
+  customer_name text NOT NULL,
+  customer_phone text NOT NULL,
+  customer_whatsapp text,
+  customer_address text NOT NULL,
+  customer_city text NOT NULL,
+  customer_notes text,
+  items jsonb NOT NULL,
+  total_amount numeric NOT NULL,
+  shipping_cost numeric NOT NULL,
+  status text NOT NULL DEFAULT 'Pending',
+  payment_method text NOT NULL,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 3. Create Products Table
+CREATE TABLE products (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  price numeric NOT NULL,
+  original_price numeric NOT NULL,
+  description text,
+  long_description text,
+  image text NOT NULL,
+  images text[] DEFAULT '{}',
+  rating numeric DEFAULT 5,
+  reviews_count numeric DEFAULT 0,
+  category text NOT NULL,
+  features text[] DEFAULT '{}',
+  variants text[] DEFAULT '{}',
+  sizes text[] DEFAULT '{}',
+  variant_images jsonb DEFAULT '{}'::jsonb,
+  stock numeric DEFAULT 10,
+  badge text,
+  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Disable Row Level Security (RLS) to instantly fix Permission Denied / empty sync blocks
+ALTER TABLE appointments DISABLE ROW LEVEL SECURITY;
+ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+ALTER TABLE products DISABLE ROW LEVEL SECURITY;`
+                    )}
+                  </pre>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-medium font-sans border-t border-zinc-100 pt-3">
+                  <Info className="h-4.5 w-4.5 text-[#ca8a04] shrink-0" />
                   <span>The backend is pre-configured to test connection to these tables and can sync data live with zero-delay!</span>
                 </div>
               </div>
