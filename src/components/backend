@@ -1,0 +1,122 @@
+import React, { useState, useEffect } from "react";
+
+// Humare active backend ka address
+const BACKEND_URL = "https://ais-dev-gjrx2a6tugveeqc7qhlfxe-411638771549.asia-east1.run.app";
+
+export default function FileManager() {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [notes, setNotes] = useState("");
+
+  // 1. Storage se saari files load karne ka function
+  const fetchFiles = async () => {
+    try {
+      setLoading(true);
+      const res = await fetch(`${BACKEND_URL}/api/files`);
+      const data = await res.json();
+      setFiles(data);
+    } catch (err) {
+      console.error("Files load karne mein error aaya:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
+
+  // 2. File upload karne ka function
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    if (!selectedFile) return alert("Pehle koi file select karein!");
+
+    const formData = new FormData();
+    formData.append("files", selectedFile);
+    formData.append("notes", notes);
+
+    try {
+      setLoading(true);
+      const res = await fetch(`${BACKEND_URL}/api/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        alert("File kamyabi se upload ho gayi!");
+        setSelectedFile(null);
+        setNotes("");
+        fetchFiles(); // List refresh karein
+      } else {
+        alert("Upload fail ho gaya.");
+      }
+    } catch (err) {
+      console.error("Error during upload:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 3. File delete karne ka function
+  const handleDelete = async (id) => {
+    if (!window.confirm("Kya aap is file ko delete karna chahte hain?")) return;
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/files/${id}`, {
+        method: "DELETE",
+      });
+
+      if (res.ok) {
+        alert("File delete ho gayi!");
+        fetchFiles();
+      }
+    } catch (err) {
+      console.error("Error deleting file:", err);
+    }
+  };
+
+  return (
+    <div style={{ padding: "20px", fontFamily: "sans-serif", maxWidth: "600px", margin: "0 auto" }}>
+      <h2>My Live Storage Vault</h2>
+
+      {/* Upload Form */}
+      <form onSubmit={handleUpload} style={{ marginBottom: "30px", padding: "15px", border: "1px solid #ccc", borderRadius: "8px" }}>
+        <h3>Upload File</h3>
+        <input type="file" onChange={(e) => setSelectedFile(e.target.files[0])} style={{ marginBottom: "10px", display: "block" }} />
+        <input 
+          type="text" 
+          placeholder="Description / Notes (Optional)" 
+          value={notes} 
+          onChange={(e) => setNotes(e.target.value)} 
+          style={{ width: "100%", padding: "8px", marginBottom: "10px", boxSizing: "border-box" }}
+        />
+        <button type="submit" disabled={loading} style={{ padding: "8px 15px", cursor: "pointer" }}>
+          {loading ? "Uploading..." : "Upload to Backend"}
+        </button>
+      </form>
+
+      {/* File List */}
+      <h3>Uploaded Files ({files.length})</h3>
+      {loading && <p>Loading files...</p>}
+      
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {files.map((file) => (
+          <div key={file.id} style={{ padding: "10px", border: "1px solid #eee", borderRadius: "6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <p style={{ margin: "0 0 5px 0", fontWeight: "bold" }}>{file.originalname}</p>
+              <p style={{ margin: "0", fontSize: "12px", color: "#666" }}>{file.notes || "No description"}</p>
+              {/* File Download and View Link */}
+              <a href={`${BACKEND_URL}/uploads/${file.filename}`} target="_blank" rel="noreferrer" style={{ fontSize: "12px", color: "blue", marginRight: "10px" }}>
+                View/Download File
+              </a>
+            </div>
+            <button onClick={() => handleDelete(file.id)} style={{ padding: "5px 10px", background: "red", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>
+              Delete
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

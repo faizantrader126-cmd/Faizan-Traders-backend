@@ -1,0 +1,29 @@
+import { useState } from "react";
+import FileManager from "./components/FileManager";
+
+function MyProductPage() {
+  const [isVaultOpen, setIsVaultOpen] = useState(false);
+  const [selectedImage, setSelectedImage] = useState("");
+
+  return (
+    <div>
+      {/* Jab aap click karein to modal open ho */}
+      <button onClick={() => setIsVaultOpen(true)}>Browse Uploaded Images</button>
+      
+      {selectedImage && <img src={selectedImage} alt="Product" />}
+
+      {/* Ye raha modal version */}
+      {isVaultOpen && (
+        <FileManager 
+          isModalMode={true} 
+          allowedCategories={["image"]} // Sirf images show hongi
+          onSelectFile={(file) => {
+            setSelectedImage(`https://ais-dev-gjrx2a6tugveeqc7qhlfxe-411638771549.asia-east1.run.app/uploads/${file.filename}`);
+            setIsVaultOpen(false); // Modal close hojayega
+          }}
+          onClose={() => setIsVaultOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
